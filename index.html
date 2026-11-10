@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Total JSON Commander</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Жесткое выделение активной строки */
+        .active-row { 
+            background-color: #2563eb !important; 
+            color: #ffffff !important; 
+        }
+        /* Приглушаем цвета типов в активной строке */
+        .active-row .type-string { color: #86efac !important; } 
+        .active-row .type-number { color: #fde047 !important; } 
+        .active-row .type-boolean { color: #d8b4fe !important; } 
+        .active-row .type-object, .active-row .type-array { color: #93c5fd !important; } 
+        .active-row .type-null { color: #d1d5db !important; } 
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans h-screen overflow-hidden select-none" 
+      x-data="jsonCommander()" 
+      @keydown.window="handleGlobalKey($event)">
+
+    <div class="flex flex-col h-full">
+        
+        <!-- Верхняя панель путей -->
+        <div class="flex bg-gray-100 border-b border-gray-300 text-sm py-2 px-4 shadow-sm z-10">
+            <div class="w-1/2 pr-2 border-r border-gray-300 flex items-center">
+                <span class="font-bold text-gray-500 mr-2">Путь L:</span>
+                <span class="font-mono text-blue-700 truncate cursor-pointer hover:underline" @click="panes.left.path = []">
+                    <span x-text="getPathString('left')"></span>
+                </span>
+            </div>
+            <div class="w-1/2 pl-4 flex items-center">
+                <span class="font-bold text-gray-500 mr-2">Путь R:</span>
+                <span class="font-mono text-blue-700 truncate cursor-pointer hover:underline" @click="panes.right.path = []">
+                    <span x-text="getPathString('right')"></span>
+                </span>
+            </div>
+        </div>
+
+        <!-- Основные панели -->
+        <div class="flex flex-1 overflow-hidden">
+            <template x-for="side in ['left', 'right']" :key="side">
+                <div class="w-1/2 flex flex-col border-r border-gray-300 last:border-r-0 bg-white">
+                    
+                    <!-- Заголовок панели -->
+                    <div class="flex justify-between items-center px-4 py-2 font-bold text-white transition-colors"
+                         :class="activeSide === side ? 'bg-blue-600' : 'bg-gray-400'">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"></path></svg>
+                            <span x-text="side === 'left' ? 'Левая панель' : 'Правая панель'"></span>
+                        </div>
+                        <div class="text-xs font-normal opacity-80">
+                            <span x-text="getEntries(side).length"></span> элементов
+                        </div>
+                    </div>
+
+                    <!-- Поиск (фильтр) -->
+                    <div class="px-3 py-1.5 border-b border-gray-200 bg-gray-50 flex items-center">
+                        <svg class="w-4 h-4 text-gray-400 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        <input type="text" 
+                               placeholder="Фильтр ключей..." 
+                               x-model="filters[side]" 
+                               @input="panes[side].cursor = 0"
+                               class="w-full bg-transparent text-sm outline-none text-gray-600">
+                    </div>
+
+                    <!-- Список элементов -->
+                    <div class="flex-1 overflow-y-auto outline-none" 
+                         :class="activeSide === side ? 'ring-2 ring-inset ring-blue-600' : ''">
+                        <template x-for="(entry, index) in getEntries(side)" :key="entry.key">
+                            <div class="flex items-center px-4 py-1.5 text-sm border-b border-gray-100 cursor-pointer font-mono"
+                                 :class="[activeSide === side && panes[side].cursor === index ? 'active-row' : 'hover:bg-gray-100']"
+                                 @click="activeSide = side; panes[side].cursor = index;"
+                                 @dblclick="if(!entry.isParent) startEdit()">
+                                
+                                <!-- Если включен режим редактирования этого элемента -->
+                                <div x-show="editState.active && editState.side === side && editState.key === entry.key" class="flex w-full items-center gap-2">
+                                    <span x-text="entry.key + ':'" class="font-bold"></span>
+                                    <input type="text" 
+                                           x-model="editState.value"
+                                           x-ref="editInput"
+                                           @keydown.enter.prevent="saveEdit()"
+                                           @keydown.escape.prevent="cancelEdit()"
+                                           @blur="saveEdit()"
+                                           class="flex-1 bg-white text-black px-1 outline-none border border-blue-400 rounded">
+                                </div>
+
+                                <!-- Обычный вид элемента -->
+                                <div x-show="!editState.active || editState.side !== side || editState.key !== entry.key" class="flex-1 flex items-center overflow-hidden">
+                                    <div class="flex-1 flex items-center gap-2 overflow-hidden">
+                                        <template x-if="entry.isParent">
+                                            <div class="flex items-center gap-2">
+                                                <span class="text-gray-400">📁</span>
+                                                <span class="font-bold">..</span>
+                                            </div>
+                                        </template>
+                                        <template x-if="!entry.isParent">
+                                            <div class="flex items-center gap-2">
+                                                <span x-show="entry.type === 'object' || entry.type === 'array'">📁</span>
+                                                <span x-show="entry.type !== 'object' && entry.type !== 'array'">📄</span>
+                                                <span class="truncate" x-text="entry.key + ':'"></span>
+                                                <span class="truncate opacity-80" x-text="getPreview(entry.value, entry.type)"></span>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    
+                                    <!-- Тип данных -->
+                                    <div class="text-xs uppercase tracking-wider ml-2 whitespace-nowrap"
+                                         :class="'type-' + entry.type"
+                                         x-text="entry.isParent ? '' : getTypeLabel(entry.type)">
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                        
+                        <div x-show="getEntries(side).length === 0" class="p-4 text-center text-gray-400 text-sm italic">
+                            Ничего не найдено
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- Нижняя панель статуса -->
+        <div class="bg-gray-100 border-t border-gray-300 flex divide-x divide-gray-300 text-sm">
+            <div class="flex-1 p-2 text-center">
+                <div class="text-xs text-gray-500 uppercase">Выбранный ключ</div>
+                <div class="font-mono font-bold truncate" x-text="getSelectedEntry()?.key || '-'"></div>
+            </div>
+            <div class="flex-1 p-2 text-center">
+                <div class="text-xs text-gray-500 uppercase">Тип значения</div>
+                <div class="font-mono font-bold" :class="'type-' + getSelectedEntry()?.type" x-text="getSelectedEntry()?.isParent ? '' : getTypeLabel(getSelectedEntry()?.type) || '-'"></div>
+            </div>
+            <div class="flex-1 p-2 text-center">
+                <div class="text-xs text-gray-500 uppercase">Глубина вложенности</div>
+                <div class="font-mono font-bold" x-text="panes[activeSide].path.length"></div>
+            </div>
+        </div>
+
+        <!-- Футер с действиями -->
+        <div class="bg-gray-50 border-t border-gray-300 p-3 flex justify-between items-center text-sm text-gray-600">
+            <div class="flex items-center gap-3">
+                <button @click="copyNode()" class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-full shadow transition-colors focus:outline-none">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path></svg>
+                    F5 Копировать
+                </button>
+                <button @click="startEdit()" class="flex items-center gap-2 bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-1.5 rounded-full shadow transition-colors focus:outline-none">
+                    F2 Правка
+                </button>
+                <button @click="startCreate()" class="flex items-center gap-2 bg-green-100 hover:bg-green-200 text-green-800 px-4 py-1.5 rounded-full shadow transition-colors focus:outline-none">
+                    F7 Создать
+                </button>
+                <button @click="deleteNode()" class="flex items-center gap-2 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-1.5 rounded-full shadow transition-colors focus:outline-none">
+                    F8 Удалить
+                </button>
+                
+                <div class="h-6 w-px bg-gray-300 mx-2"></div>
+                
+                <label class="cursor-pointer text-blue-600 hover:text-blue-800 font-medium">
+                    Загрузить JSON
+                    <input type="file" accept=".json" class="hidden" @change="loadJson($event)">
+                </label>
+                <button @click="saveJson()" class="text-blue-600 hover:text-blue-800 font-medium">Сохранить JSON</button>
+            </div>
+
+            <div class="text-xs text-gray-500 flex gap-4">
+                <span><kbd class="bg-gray-200 px-1 rounded">Tab</kbd> переключить панель</span>
+                <span><kbd class="bg-gray-200 px-1 rounded">Enter</kbd> развернуть</span>
+                <span><kbd class="bg-gray-200 px-1 rounded">Bksp</kbd> вверх</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно создания -->
+    <div x-show="createState.active" x-cloak class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-96" @click.outside="cancelCreate()">
+            <h3 class="text-lg font-bold mb-4 text-gray-800">Создать новый элемент</h3>
+            
+            <div class="mb-4" x-show="!Array.isArray(getCurrentNode(activeSide))">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Имя ключа</label>
+                <input type="text" 
+                       x-model="createState.key" 
+                       x-ref="createKeyInput" 
+                       @keydown.enter.prevent="saveCreate()" 
+                       class="w-full border border-gray-300 rounded px-3 py-1.5 outline-none focus:border-blue-500 font-mono text-sm">
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Тип данных</label>
+                <select x-model="createState.type" class="w-full border border-gray-300 rounded px-3 py-1.5 outline-none focus:border-blue-500 text-sm">
+                    <option value="string">Строка (String)</option>
+                    <option value="number">Число (Number)</option>
+                    <option value="boolean">Логическое (Boolean)</option>
+                    <option value="object">Объект (Object)</option>
+                    <option value="array">Массив (Array)</option>
+                    <option value="null">Null</option>
+                </select>
+            </div>
+
+            <!-- Поле значения (скрыто для объектов, массивов и null) -->
+            <div class="mb-6" x-show="['string', 'number', 'boolean'].includes(createState.type)">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Значение</label>
+                <select x-show="createState.type === 'boolean'" x-model="createState.value" class="w-full border border-gray-300 rounded px-3 py-1.5 outline-none focus:border-blue-500 text-sm">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                </select>
+                <input x-show="createState.type !== 'boolean'" 
+                       :type="createState.type === 'number' ? 'number' : 'text'" 
+                       x-model="createState.value" 
+                       @keydown.enter.prevent="saveCreate()" 
+                       class="w-full border border-gray-300 rounded px-3 py-1.5 outline-none focus:border-blue-500 font-mono text-sm">
+            </div>
+
+            <div class="flex justify-end gap-2">
+                <button @click="cancelCreate()" class="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 text-sm font-medium transition-colors">Отмена (Esc)</button>
+                <button @click="saveCreate()" class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 text-sm font-medium transition-colors">Создать (Enter)</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function jsonCommander() {
+            return {
+                activeSide: 'left',
+                filters: { left: '', right: '' },
+                editState: { active: false, side: '', key: '', value: '', type: '' },
+                createState: { active: false, key: '', type: 'string', value: '' },
+                panes: {
+                    left: {
+                        data: {
+                            project: "Total JSON Commander",
+                            version: "1.2.0",
+                            author: "Antigravity",
+                            settings: { theme: "dark", autoSave: true, maxDepth: 5 },
+                            shortcuts: { copy: "F5", delete: "F8", refresh: "Ctrl+R" },
+                            features: ["two-pane", "drag-n-drop", "diff"],
+                            statistics: { views: 1540, likes: 320 }
+                        },
+                        path: [],
+                        cursor: 0
+                    },
+                    right: {
+                        data: {
+                            backup: { status: "ожидание", last_sync: "2026-11-10", destination_folder: "/var/log/json_manager/" },
+                            active_sessions: [],
+                            meta: { description: "Целевая панель для прототипа", theme: "dark" }
+                        },
+                        path: [],
+                        cursor: 0
+                    }
+                },
+
+                // --- Обработка клавиатуры ---
+                handleGlobalKey(e) {
+                    const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
+
+                    // Если фокус в поле ввода, обрабатываем только Escape
+                    if (isInput) {
+                        if (e.key === 'Escape') {
+                            e.preventDefault();
+                            if (this.editState.active) this.cancelEdit();
+                            if (this.createState.active) this.cancelCreate();
+                            e.target.blur();
+                        }
+                        return; // Разрешаем ввод, Backspace, стрелки и т.д. работать нативно
+                    }
+
+                    // Глобальные горячие клавиши (работают только вне полей ввода)
+                    const keyActions = {
+                        'ArrowUp': () => this.moveCursor(-1),
+                        'ArrowDown': () => this.moveCursor(1),
+                        'Tab': () => this.switchPane(),
+                        'Enter': () => this.enterNode(),
+                        'Backspace': () => this.goBack(),
+                        'F2': () => this.startEdit(),
+                        'F5': () => this.copyNode(),
+                        'F7': () => this.startCreate(),
+                        'F8': () => this.deleteNode()
+                    };
+
+                    if (keyActions[e.key]) {
+                        e.preventDefault();
+                        keyActions[e.key]();
+                    }
+                },
+
+                // --- Навигация и данные ---
+                getCurrentNode(side) {
+                    let current = this.panes[side].data;
+                    for (let key of this.panes[side].path) {
+                        if (current === undefined || current === null) return null;
+                        current = current[key];
+                    }
+                    return current;
+                },
+
+                getEntries(side) {
+                    let node = this.getCurrentNode(side);
+                    let entries = [];
+                    
+                    if (this.panes[side].path.length > 0) {
+                        entries.push({ key: '..', type: 'parent', value: null, isParent: true });
+                    }
+
+                    if (node && typeof node === 'object') {
+                        Object.entries(node).forEach(([key, value]) => {
+                            entries.push({ 
+                                key: key, 
+                                type: this.getType(value), 
+                                value: value,
+                                isParent: false
+                            });
+                        });
+                    }
+
+                    let filterText = this.filters[side].toLowerCase();
+                    if (filterText) {
+                        entries = entries.filter(e => e.isParent || e.key.toLowerCase().includes(filterText));
+                    }
+
+                    return entries;
+                },
+
+                getSelectedEntry() {
+                    let entries = this.getEntries(this.activeSide);
+                    return entries[this.panes[this.activeSide].cursor] || null;
+                },
+
+                getPathString(side) {
+                    let p = this.panes[side].path;
+                    if (p.length === 0) return '$';
+                    return '$.' + p.map(k => typeof k === 'number' ? `[${k}]` : k).join('.');
+                },
+
+                getType(val) {
+                    if (val === null) return 'null';
+                    if (Array.isArray(val)) return 'array';
+                    return typeof val;
+                },
+
+                getTypeLabel(type) {
+                    const labels = {
+                        string: 'Строка', number: 'Число', boolean: 'Логическое',
+                        object: 'Объект', array: 'Массив', null: 'Null'
+                    };
+                    return labels[type] || type;
+                },
+
+                getPreview(val, type) {
+                    if (type === 'object') return '{...}';
+                    if (type === 'array') return `[${val.length}]`;
+                    if (type === 'string') return `"${val}"`;
+                    return String(val);
+                },
+
+                switchPane() {
+                    this.activeSide = this.activeSide === 'left' ? 'right' : 'left';
+                },
+
+                moveCursor(delta) {
+                    let entries = this.getEntries(this.activeSide);
+                    if (entries.length === 0) return;
+                    
+                    let newCursor = this.panes[this.activeSide].cursor + delta;
+                    if (newCursor >= 0 && newCursor < entries.length) {
+                        this.panes[this.activeSide].cursor = newCursor;
+                    }
+                },
+
+                enterNode() {
+                    let entry = this.getSelectedEntry();
+                    if (!entry) return;
+
+                    if (entry.isParent) {
+                        this.goBack();
+                    } else if (entry.type === 'object' || entry.type === 'array') {
+                        this.panes[this.activeSide].path.push(entry.key);
+                        this.panes[this.activeSide].cursor = 0;
+                        this.filters[this.activeSide] = '';
+                    }
+                },
+
+                goBack() {
+                    if (this.panes[this.activeSide].path.length > 0) {
+                        let oldPath = [...this.panes[this.activeSide].path];
+                        let poppedKey = oldPath.pop();
+                        this.panes[this.activeSide].path = oldPath;
+                        this.filters[this.activeSide] = '';
+                        
+                        let entries = this.getEntries(this.activeSide);
+                        let idx = entries.findIndex(e => e.key === poppedKey);
+                        this.panes[this.activeSide].cursor = idx >= 0 ? idx : 0;
+                    }
+                },
+
+                // --- Редактирование ---
+                startEdit() {
+                    let entry = this.getSelectedEntry();
+                    if (!entry || entry.isParent) return;
+
+                    let valToEdit = entry.value;
+                    if (entry.type === 'object' || entry.type === 'array') {
+                        valToEdit = JSON.stringify(entry.value);
+                    }
+
+                    this.editState = {
+                        active: true,
+                        side: this.activeSide,
+                        key: entry.key,
+                        value: valToEdit,
+                        type: entry.type
+                    };
+
+                    this.$nextTick(() => {
+                        let inputs = document.querySelectorAll('input[x-ref="editInput"]');
+                        if (inputs.length > 0) inputs[0].focus();
+                    });
+                },
+
+                saveEdit() {
+                    if (!this.editState.active) return;
+                    
+                    let { side, key, value, type } = this.editState;
+                    let node = this.getCurrentNode(side);
+                    
+                    try {
+                        let parsedValue = value;
+                        if (type === 'object' || type === 'array') {
+                            parsedValue = JSON.parse(value);
+                        } else if (type === 'number') {
+                            parsedValue = Number(value);
+                            if (isNaN(parsedValue)) throw new Error("Введено не число");
+                        } else if (type === 'boolean') {
+                            parsedValue = value.trim().toLowerCase() === 'true';
+                        }
+
+                        node[key] = parsedValue;
+                        this.editState.active = false;
+                    } catch (e) {
+                        alert("Ошибка сохранения: " + e.message);
+                    }
+                },
+
+                cancelEdit() {
+                    this.editState.active = false;
+                },
+
+                // --- Создание ---
+                startCreate() {
+                    let node = this.getCurrentNode(this.activeSide);
+                    if (!node || typeof node !== 'object') {
+                        alert("Нельзя создать элемент внутри примитива.");
+                        return;
+                    }
+                    this.createState = { active: true, key: '', type: 'string', value: '' };
+                    this.$nextTick(() => this.$refs.createKeyInput?.focus());
+                },
+
+                saveCreate() {
+                    let node = this.getCurrentNode(this.activeSide);
+                    let { key, type, value } = this.createState;
+
+                    if (!Array.isArray(node)) {
+                        if (!key.trim()) { alert("Введите имя ключа"); return; }
+                        if (node.hasOwnProperty(key)) { alert("Ключ уже существует"); return; }
+                    }
+
+                    let parsedValue = null;
+                    if (type === 'string') parsedValue = value;
+                    else if (type === 'number') parsedValue = Number(value) || 0;
+                    else if (type === 'boolean') parsedValue = value === 'true';
+                    else if (type === 'object') parsedValue = {};
+                    else if (type === 'array') parsedValue = [];
+                    else if (type === 'null') parsedValue = null;
+
+                    if (Array.isArray(node)) {
+                        node.push(parsedValue);
+                    } else {
+                        node[key] = parsedValue;
+                    }
+
+                    this.createState.active = false;
+                    
+                    // Перемещаем курсор на созданный элемент
+                    let newKey = Array.isArray(node) ? String(node.length - 1) : key;
+                    this.panes[this.activeSide].cursor = this.getEntries(this.activeSide).findIndex(e => e.key === newKey);
+                },
+
+                cancelCreate() {
+                    this.createState.active = false;
+                },
+
+                // --- Операции с файлами ---
+                copyNode() {
+                    let entry = this.getSelectedEntry();
+                    if (!entry || entry.isParent) return;
+
+                    let destSide = this.activeSide === 'left' ? 'right' : 'left';
+                    let destNode = this.getCurrentNode(destSide);
+                    
+                    if (!destNode || typeof destNode !== 'object') {
+                        alert("Целевой узел не является объектом или массивом!");
+                        return;
+                    }
+
+                    let clonedValue = JSON.parse(JSON.stringify(entry.value));
+
+                    if (Array.isArray(destNode)) {
+                        destNode.push(clonedValue);
+                    } else {
+                        if (destNode.hasOwnProperty(entry.key)) {
+                            if(!confirm(`Ключ "${entry.key}" уже существует. Перезаписать?`)) return;
+                        }
+                        destNode[entry.key] = clonedValue;
+                    }
+                    
+                    this.panes[destSide].cursor = this.getEntries(destSide).findIndex(e => e.key === entry.key);
+                },
+
+                deleteNode() {
+                    let entry = this.getSelectedEntry();
+                    if (!entry || entry.isParent) return;
+
+                    if (!confirm(`Удалить ключ "${entry.key}"?`)) return;
+
+                    let side = this.activeSide;
+                    let currentNode = this.getCurrentNode(side);
+
+                    if (Array.isArray(currentNode)) {
+                        currentNode.splice(entry.key, 1);
+                    } else {
+                        delete currentNode[entry.key];
+                    }
+
+                    let entries = this.getEntries(side);
+                    if (this.panes[side].cursor >= entries.length) {
+                        this.panes[side].cursor = Math.max(0, entries.length - 1);
+                    }
+                },
+
+                saveJson() {
+                    let dataStr = JSON.stringify(this.panes[this.activeSide].data, null, 2);
+                    let blob = new Blob([dataStr], { type: "application/json" });
+                    let url = URL.createObjectURL(blob);
+                    
+                    let a = document.createElement('a');
+                    a.href = url;
+                    a.download = `data_${this.activeSide}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                },
+
+                loadJson(event) {
+                    let file = event.target.files[0];
+                    if (!file) return;
+
+                    let reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            let parsed = JSON.parse(e.target.result);
+                            this.panes[this.activeSide].data = parsed;
+                            this.panes[this.activeSide].path = [];
+                            this.panes[this.activeSide].cursor = 0;
+                            this.filters[this.activeSide] = '';
+                        } catch (err) {
+                            alert("Ошибка парсинга JSON: " + err.message);
+                        }
+                    };
+                    reader.readAsText(file);
+                    event.target.value = '';
+                }
+            }
+        }
+    </script>
+</body>
+</html>
